@@ -1,0 +1,1384 @@
+---
+title: "Detection of tuberculosis regulatory SNPs in GWAS studies"
+author: "Yvon Mbouamboua, Pascal Rihet & Jacques van Helden "
+date: '`r Sys.Date()`'
+output:
+  html_document:
+    code_folding: hide
+    self_contained: no
+    fig_caption: yes
+    highlight: zenburn
+    theme: cerulean
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+  ioslides_presentation:
+    colortheme: dolphin
+    fig_caption: yes
+    fig_height: 6
+    fig_width: 7
+    fonttheme: structurebold
+    highlight: tango
+    incremental: no
+    keep_md: no
+    smaller: yes
+    theme: cerulean
+    toc: yes
+    widescreen: yes
+  pdf_document:
+    fig_caption: yes
+    highlight: zenburn
+    toc: yes
+    toc_depth: 3
+  slidy_presentation:
+    self_contained: no
+    fig_caption: yes
+    fig_height: 6
+    fig_width: 7
+    highlight: tango
+    incremental: no
+    keep_md: no
+    smaller: yes
+    theme: cerulean
+    toc: yes
+    toc_float: yes
+    widescreen: yes
+  beamer_presentation:
+    colortheme: dolphin
+    fig_caption: yes
+    fig_height: 6
+    fig_width: 7
+    fonttheme: structurebold
+    highlight: tango
+    incremental: no
+    keep_tex: no
+    slide_level: 2
+    theme: Montpellier
+    toc: yes
+  word_document:
+    toc: yes
+    toc_depth: 3
+font-import: http://fonts.googleapis.com/css ?family=Risque
+font-family: Garamond
+subtitle: Susceptibility to Mycobacterium tuberculosis infection measurement 
+address: TAGC lab, Aix-Marseille Université, France
+transition: linear
+editor_options: 
+  chunk_output_type: console
+bibliography: 
+    bibliography.bib
+csl:
+    biomed-central.csl
+---
+  
+```{r parameters, echo=FALSE}
+## Define user-specified parameters for the analyses
+## Parameters
+parameters <- list(
+  query =  "EFO_0008407",
+  population = "EUR",
+  #maf <- 0.05,
+  r2 <- 0.8,
+  working.dir = working.dir <- '~/Google\ Drive/Yvon_Mbouamboua_these_2018/gwas/cisreg-GWAS',
+  # query = "type ii diabetes mellitus",
+  update.flowcharts = TRUE, # Update the flowcharts with graphviz dot
+  flowchart.formats = c("pdf", "png"), # List of formats to generate
+  flowchart.format = "pdf", # Format for insertion in the report,
+  force.download = FALSE # if TRUE, files are downloaded even if already present
+)
+
+working.dir <- parameters$working.dir
+setwd(working.dir)
+source("R/bed_to_granges.R")
+```
+
+```{r setup, include=FALSE, size="huge"}
+library(knitr)
+## Default parameters for displaying the slides
+knitr::opts_chunk$set(
+  echo = TRUE, 
+  eval = TRUE, 
+  fig.width = 7, 
+  fig.height = 5, 
+  fig.align = "center", 
+  fig.path = paste(sep="", "figures/", parameters$query, "_"),
+  size = "tiny", 
+  warning = FALSE, 
+  results = TRUE, 
+  message = FALSE, 
+  comment = "")
+fig.nb <- 0 ## Initialize figure counter
+```
+
+
+
+```{r libraries, include=FALSE,  eval=TRUE, echo=FALSE, warning=FALSE}
+cran.libraries.to.install <- 
+  c("dplyr",    ## data manipulation
+    "devtools", ## Required to install github libraries
+    "ggplot2", ## dataviz
+    "scater",
+    "haploR",
+    # "Gviz",
+    "tidyr",
+    "VSE",
+    "DiagrammeR",
+    "VennDiagram",
+    "jsonlite",
+    "httr",
+    "xml2",
+    "RCurl",
+    "stringr"
+    
+  )     
+
+bioconductor.libraries.to.install <- c(
+  "biomaRt",
+  "GenomicRanges",
+  "rGREAT",
+  "XGR",
+  #"FunciSNP",
+   "TissueEnrich"
+)
+
+
+
+## For github libraries we need to know the account for each package -> we encode this as a named vector
+github.libraries.to.install <- c("ReMapEnrich" = "remap-cisreg")
+
+message("Loading CRAN libraries")
+for (lib in cran.libraries.to.install) {
+  if (require(lib, character.only = TRUE, quietly = TRUE)) {
+    message("\tLoaded library\t", lib)
+  } else {
+    message("Installing CRAN library\t", lib)
+    install.packages(lib, dependencies = TRUE)
+  }
+  require(lib, character.only = TRUE, quietly = TRUE)
+}
+
+message("Loading Bioconductor libraries")
+for (lib in bioconductor.libraries.to.install) {
+  if (require(lib, character.only = TRUE, quietly = TRUE)) {
+    message("\tLoaded library\t", lib)
+  } else {
+    message("Installing Bioconductor library\t", lib)
+    if (!("BiocManager" %in% rownames(installed.packages()))) {
+      install.packages("BiocManager")
+    } 
+    
+    BiocManager::install(lib, dependencies = TRUE)
+    if (!require(lib, character.only = TRUE, quietly = TRUE)) {
+      stop("Could not install and load package ", lib)
+    }
+  }
+  require(lib, character.only = TRUE, quietly = TRUE)
+}
+
+
+message("Loading github libraries")
+for (lib in names(github.libraries.to.install)) {
+  if (require(lib, character.only = TRUE, quietly = TRUE)) {
+    message("\tLoaded library\t", lib)
+  } else {
+    library(devtools)
+    message("Installing github library\t", lib)
+    github.path <- paste(sep = "/", github.libraries.to.install[lib], lib)
+    install_github(github.path, dependencies = TRUE)
+    #    install_github(github.path, dependencies = TRUE, force = TRUE)
+  }
+  require(lib, character.only = TRUE, quietly = TRUE)
+}
+
+```
+
+
+
+
+
+```{r configuration}
+message("Defining directories")
+
+# Result directory (export result tables)
+dir.results <- file.path(working.dir, "results")
+result.folders <- list(TagSNPs = "TagSNPs",
+                       HaploReg = "HaploReg",
+                       SOIs = "SOIs",
+                       ReMap = "ReMap",
+                       RSAT = "RSAT",
+                       rSNPs = "rSNPs"
+)
+
+
+dir.path <- vector()
+for (folder in c(dir.results, result.folders)) {
+  dir.path[folder] <- file.path(dir.results, folder)
+  dir.create(dir.path[folder], showWarnings = FALSE, recursive = TRUE)
+}
+
+message("\tWorking directory: ", getwd())
+
+## Prepare a table for the output files
+outfiles <- data.frame()
+
+```
+
+
+## Introduction
+
+This report summarises the results of **cisreg-GWAS**, an automatic workflow to predict the impact of genetic variations on cis-regulation, based on the integration of complementary data types. 
+
+1. Genome-Wise Association Studies (GWAS), obtained from [**GWAS catalog**](https://www.ebi.ac.uk/gwas/)
+2. Linkage desequilibrium data, from [**HaploReg**](https://pubs.broadinstitute.org/mammals/haploreg/haploreg.php)
+3. Analysis of transcription factor binding motifs, with the [**Regulatory Sequence Analysis Tools (RSAT)**](http://rsat.eu/)
+4. ChIP-seq data for transcription factor binding, from the [**Remap**](http://pedagogix-tagc.univ-mrs.fr/remap/) database
+5. Epigenetic marks (histone modifications)
+6. DNA accessibility, from [**HaploReg**](https://pubs.broadinstitute.org/mammals/haploreg/haploreg.php)
+5. eQTL, from [**HaploReg**](https://pubs.broadinstitute.org/mammals/haploreg/haploreg.php)
+
+
+## Pipeline
+
+```{r fig.cap = paste("Annotation pipeline of genetic variants."), out.width = "100%"}
+
+message("Updating flowchart figures")
+for (flowchart in c(
+  "flowchart/method",
+  "flowchart/rsnp_pipeline")) {
+  
+  for (format in parameters$flowchart.formats) {
+    outfile <- paste(sep="", flowchart, ".", format)
+    cmd <- paste(sep="", "dot -T", format, 
+                 " ",  flowchart,".dot",
+                 " -o ", outfile)
+    #    message("\t", format, "\t", cmd)
+    system(cmd)  
+    message("\t", outfile)
+  }
+}
+
+# Generate flowchart
+knitr::include_graphics(paste(sep = "", "flowchart/rsnp_pipeline.", parameters["flowchart.format"]))
+```
+
+## Downloading data
+
+
+
+```{r downloag_gwas_data}
+## Define the query
+#query = "EFO_0001068" # Identifier of malaria GWAS catalog
+
+## URL to the primary GWAS page for the query disease
+gwascatalog.disease.url <- paste(
+  sep = "", 
+  "https://www.ebi.ac.uk/gwas/search?query=", parameters$query)
+message("GWAS catalog link\t", gwascatalog.disease.url)
+
+gwascatalog.table.url <- paste(
+  sep = "", "https://www.ebi.ac.uk/gwas/api/search/downloads?q=text:%22", parameters$query, "%22&pvalfilter=&orfilter=&betafilter=&datefilter=&genomicfilter=&traitfilter[]=&genotypingfilter[]=&dateaddedfilter=&efo=true&facet=association")
+message("GWAS TSV table\t", gwascatalog.table.url)
+
+
+
+## Downloading disease-associated information from GWAS catalog
+query.url <- paste(sep = "", "https://www.ebi.ac.uk/gwas/api/search/downloads?q=text:%22",
+                   parameters$query,
+                   "%22&pvalfilter=&orfilter=&betafilter=&datefilter=&genomicfilter=&traitfilter[]=&genotypingfilter[]=&dateaddedfilter=&efo=true&facet=association")
+
+gwas.file <- paste(sep = "", 'data/gwas_catalog_', parameters$query,'.tsv')
+
+if (parameters$force.download || !file.exists(gwas.file)) {
+  message("Downloading disease-associated SNPs and Genes from GWAS catalog")
+  download.file(url = query.url,
+                destfile = gwas.file, method = 'auto')
+  message("\tDownloaded ", parameters$query, "-associated GWAS in file ", gwas.file)
+} else {
+  message("\tDisease-associated SNPs file already there: ", gwas.file)
+}
+
+```
+
+
+To select all disease trait-associated variants, we downloaded the publicly available GWAS data from the [GWAS catalog](https://www.ebi.ac.uk/gwas) website [@macarthur_new_2017].
+
+Parameters for the GWAS catalog: 
+  
+- Query disease identifier: `r parameters$query`
+- Query URL: `r gwascatalog.disease.url`
+- GWAS catalog data table for disease: [click to download](`r gwascatalog.table.url`)
+
+
+**Note:**
+  
+  - The description of column headings for downloadable [GWAS catalog](https://www.ebi.ac.uk/gwas) file is  [here](https://www.ebi.ac.uk/gwas/docs/fileheaders).
+
+
+### Tag SNPs
+
+We define as **tag SNPs** the non-coding SNPs associated to the disease. 
+It has to be noted that these SNPs are not always causal, but are likely to be included in an haplotype containng a causal SNP. 
+
+We select the **Tag SNPs** by  filtering out:
+  
+  - all missing variants by keeping all with rs ID variant.
+- some redundant disease-SNPs associations  resulting from different studies.
+
+
+```{r tagSNPs}
+#message("Reading GWAS catalog in tsv format")
+gwasResults <- read.delim(file = gwas.file, 
+                          header = TRUE, 
+                          sep = "\t", 
+                          stringsAsFactors = FALSE,
+                          na.strings = c(""," ","NA"))
+
+#Filter out missing data
+gwasResultsError <- subset(gwasResults,  is.na(SNP_ID_CURRENT))
+message(nrow(gwasResultsError), " lines are missing chromosome, position and/or SNPs from GWAS catalog")
+#dim(gwasResultsError)
+gwasResults <- subset(gwasResults, ! is.na(SNP_ID_CURRENT))
+
+# Removing the duplicated SNPs
+tagSNPs <- gwasResults[!duplicated(gwasResults$SNPS), ]
+message(nrow(tagSNPs), " available SNPs from GWAS catalog")
+
+#View(gwasResults)
+
+# Export missing data in TSV table
+gwas.err.file <- "gwasResultsError.tsv"
+gwas.err.path <- file.path(dir.path["TagSNPs"], gwas.err.file)
+outfiles <- rbind(outfiles, data.frame(
+  name = "GWAS catalog errors", 
+  file = gwas.err.file, 
+  path = gwas.err.path,
+  source = "GWAS catalog",
+  description = "Disease-associated SNPs with incomplete information in GWAS catalog"))
+write.table(x = gwasResultsError,
+            file = gwas.err.path,
+            quote = FALSE,
+            sep = "\t",
+            row.names = FALSE,
+            col.names = TRUE)
+
+# Paste rs on SNP number ID
+tagSNPs$tagSNPs <- paste0("rs", sep = "", tagSNPs$SNP_ID_CURRENT)
+#dim(gwasResults)
+
+
+# Export Tag SNPs in TSV format table
+tag.snp.file <- "tagSNPs.tsv"
+tag.snp.path <- file.path(dir.path["TagSNPs"], tag.snp.file)
+outfiles <- rbind(outfiles, data.frame(
+  name = "Tag SNPs", 
+  file = tag.snp.file, 
+  path = tag.snp.path,
+  source = "GWAS catalog",
+  description = "Tag SNP, i.e. disease-associated SNPs with complete information in GWAS catalog"))
+
+write.table(x = tagSNPs,
+            file = tag.snp.path,
+            quote = FALSE,
+            sep = "\t",
+            row.names = FALSE,
+            col.names = TRUE)
+
+
+# Display 
+# kable(head(tagSNPs[, c("PUBMEDID", "DISEASE.TRAIT", "REGION", "CHR_ID", "CHR_POS", "tagSNPs",  "MAPPED_GENE", "CNV", "CONTEXT")]), caption = "**Tag SNPs from GWAS catalog**")
+```
+
+In total, we found `r length(tagSNPs$tagSNPs)` **TagSNPs** from GWAS catalog.
+
+
+```{r fig.cap = paste("Genomic context of disease-associated variants from GWAS"), out.width = "100%"}
+# Proportion of genomic context
+table <- table(tagSNPs$CONTEXT)
+pct <- round(table/sum(table)*100)
+lbls <- names(table)
+lbls <- paste(lbls, pct) # add percents to labels
+lbls <- paste(lbls, "%", sep = "") # ad % to labels
+lbls <- sub(pattern = "_variant", replacement = "", lbls)
+pie(table,
+    labels = lbls,
+    cex = 1,
+    col = rainbow(length(names(table)))
+    #main="Pie Chart of SNP regions"
+)
+```
+
+
+
+
+## Linkage desequilibrium (LD)
+
+In order to get causal SNPs, we collect from each tag SNP all the other SNPs in linkage desiquilibrium. 
+
+We used the [halpoR package](https://cran.r-project.org/web/packages/haploR/vignettes/haplor-vignette.html) [@ward_haploreg:_2012; @ward_haploreg_2016] which allows to recover SNPs in high LD (with the **r^2^ = 0.8**) using HaploReg by specifying the population. We specified the African population and submitted the **Tag SNPs from GWAS catalog.**
+  
+  **
+  To do: tableau avec 1 ligne par SNP associé à la maladie, et des colonnes d'information sur les haplotypes
+- start
+- end
+- nb of SNPs
+**
+
+```{r querying_haploreg}
+
+## Querying haploreg for the linkage desequilibrium
+
+  message("Querying HaploReg to get SNPs in linkage disequilibrium with tag SNPs")
+  haploR <- queryHaploreg(query = tagSNPs$tagSNPs, 
+                            ldThresh = r2, 
+                            ldPop = parameters$population,
+                            epi = "imputed",
+                            genetypes = "both", 
+                            verbose = TRUE,
+                            timeout = 1000) 
+  
+
+
+haploR <- haploR[!duplicated(haploR$rsID),]
+
+message(length(haploR$rsID), " SNPs in LD")
+
+#kable(head(haploR[, c( "chr", "pos_hg38", "rsID",  "is_query_snp", "query_snp_rsid" , "ref", "alt" , "r2", "D'",  "AFR", "AMR",  "ASN", "EUR")]), caption = "SNPs in linkage disequilibrium (LD)")
+
+```
+
+
+
+
+```{r}
+LD <- haploR[, c("chr", "pos_hg38", "rsID", "query_snp_rsid")]
+LD <- na.omit(LD)
+LD$pos_hg38 <- as.numeric(LD$pos_hg38)
+LDgr <- with(LD,
+GRanges( seqnames = Rle(chr),
+ranges   = IRanges(start = pos_hg38, end = pos_hg38),
+strand   = Rle("*"), idLd = rsID, idTag = query_snp_rsid))
+
+# Check the size of each LD block
+bca.avs <- makeAVS(LDgr)
+tata <- data.frame(bca.avs)
+avs.size <- avsSize(bca.avs)
+#head(avs.size)
+df1 <- tata[, c("seqnames", "start","idTag")]
+df1 <- df1[!duplicated(df1$idTag),]
+df2 <- merge(avs.size,
+            df1,
+            by.x = "tagID",
+            by.y = "idTag")
+df2$start <- as.numeric(df2$start)
+df2$end <- df2$start + 1
+df2 <- df2[, c("seqnames", "start", "end", "tagID", "Size")]
+names(df2) <- c("chrom", "tagSNPs", "start", "end", "nb LDSNPs")
+
+kable(head(df2), caption = "Number of LD SNPs per Tag SNPs.")
+
+```
+
+
+
+## Enrichment of associated variant set (AVS)
+
+```{r enrich_association_variant_set}
+
+avs.sizes.sorted <- avs.size$Size
+names(avs.sizes.sorted) <- avs.size$tagID
+avs.sizes.sorted <- sort(avs.sizes.sorted, decreasing = TRUE)
+if (length(avs.sizes.sorted) > 30) {
+avs.sizes.sorted <- avs.sizes.sorted[1:30]
+}
+
+par.ori <- par(no.readonly = TRUE)
+par(mar = c(4,6,1,1))
+barplot(avs.sizes.sorted, horiz = TRUE, las = 1, cex.names = 0.5,
+xlab = "Number of SNPs in LD")
+par(par.ori)
+
+```
+
+
+
+## SNPs Of Interest (SOIs)
+
+We define as **SNPs of Interest** (**SOIs**) all the non-coding SNPs that are either associated to the disease, or in LD with these associated SNPs. 
+
+
+```{r biomart_annotation}
+
+message("Selecting SNPs of Interest (in non-coding regions) from HaploReg")
+
+# Remove the Redundancies SNPs from HaploReg
+haploR <- haploR[!duplicated(haploR$rsID),]
+# Filtering non-conding variant
+
+attach(haploR)
+nonCoding <- haploR[which(dbSNP_functional_annotation == "INT" |
+dbSNP_functional_annotation == "." |
+dbSNP_functional_annotation == "U3" |
+dbSNP_functional_annotation == "U5"
+),]
+
+detach(haploR)
+
+nonCoding$ENSG <- gsub('\\..+$', '', nonCoding$GENCODE_id)
+
+# Export SOIs full results in TSV table
+haplor.file <- "ENSG.txt"
+haplor.path <- file.path(dir.path["HaploReg"], haplor.file)
+write.table(x = unique(nonCoding$GENCODE_name),
+file = haplor.path,
+quote = FALSE,
+sep = "\t",
+row.names = FALSE,
+col.names = FALSE)
+
+
+## biomaRt annotation
+message("Gathering information about SNPs of Interest (SOIs) from HaploReg")
+
+snpmart = useMart(biomart = "ENSEMBL_MART_SNP", dataset="hsapiens_snp")
+
+getSNP <- function(rs = "rsID", mart = snpmart) {
+results <- getBM(attributes = c(
+'refsnp_source',
+'refsnp_id',
+'chr_name',
+'chrom_start',
+'allele_1',
+'allele'
+),
+filters    = "snp_filter",
+values = rs, mart = mart)
+return(results)
+}
+
+# LD SNPs object
+snpList <- nonCoding$rsID
+
+# Run biomaRt
+getSNP <- getSNP(rs = snpList, snpmart)
+getSNP <- getSNP[!duplicated(getSNP$refsnp_id), ]
+
+## Make grange object of SOIs
+
+getSNP$chrom_start <- as.numeric(getSNP$chrom_start)
+getSNP$chr_name <- paste(sep = "", "chr", getSNP$chr_name)
+
+
+SOIsBed <- data.frame(chrom = getSNP$chr_name,
+chromStart = getSNP$chrom_start,
+chromEnd = getSNP$chrom_start + 1,
+name = getSNP$refsnp_id)
+
+SOIs <- merge(nonCoding, getSNP, by.x = "rsID", by.y = "refsnp_id",
+              all.x = FALSE, all.y = TRUE)
+
+
+SOIsError <- merge(nonCoding, getSNP, by.x = "rsID", by.y = "refsnp_id", all.x = TRUE, all.y = TRUE)
+
+biomaRtError <- subset(SOIsError, is.na(refsnp_source))
+
+print(warning("The following rsIds had no information available on dbSNP:  ",
+paste( biomaRtError$rsID , collapse = ", "),
+call. = FALSE))
+
+
+# Export SOIs full results in TSV table
+haplor.file <- "SOIs.tsv"
+haplor.path <- file.path(dir.path["SOIs"], haplor.file)
+write.table(x = SOIs,
+file = haplor.path,
+quote = FALSE,
+sep = "\t",
+row.names = FALSE,
+col.names = TRUE)
+
+# Export SOIs in bed format
+haplor.file <- "SOIs.bed"
+haplor.path <- file.path(dir.path["SOIs"], haplor.file)
+write.table(x = SOIsBed,
+file = haplor.path,
+quote = FALSE,
+sep = "\t",
+row.names = FALSE,
+col.names = FALSE)
+
+# Export SOIs in txt format
+haplor.file <- "haploR.txt"
+haplor.path <- file.path(dir.path["SOIs"], haplor.file)
+write.table(x = SOIs$rsID,
+file = haplor.path,
+quote = FALSE,
+sep = "\t",
+row.names = FALSE,
+col.names = FALSE)
+
+#kable(head(SOIs[, c( "chr_name", "chrom_start", "rsID", "ref", "alt")]), caption = "SNPs of interest (SOIs)")
+```
+
+We select the **SOIs** by keeping all **LD SNPs in non-coding regions** and we checking these SNPs in dbSNP using `biomaRt package`. We are a total **`r length(getSNP$refsnp_id)` SOIs.**
+
+
+
+```{r fig.cap = paste("Genomic context of SNPs of interest"), out.width = "100%"}
+message("Drawing pie chart of SNP distribution in non-coding regions")
+# Proportion of genomic context
+nonCoding$dbSNP_functional_annotation <- sub(pattern = "^.$", "intergenic", nonCoding$dbSNP_functional_annotation)
+nonCoding$dbSNP_functional_annotation <- sub(pattern = "^INT$", "intron", nonCoding$dbSNP_functional_annotation)
+nonCoding$dbSNP_functional_annotation <- sub(pattern = "^U3$", "3'UTR", nonCoding$dbSNP_functional_annotation)
+nonCoding$dbSNP_functional_annotation <- sub(pattern = "^U5$", "5'UTR", nonCoding$dbSNP_functional_annotation)
+table <- table(nonCoding$dbSNP_functional_annotation)
+pct <- signif(table/sum(table)*100, digits = 3)
+lbls <- names(table)
+lbls <- paste(lbls, pct) # add percents to labels
+lbls <- paste(lbls, "%", sep = "") # ad % to labels
+pie(table,
+    labels = lbls,
+    cex = 1,
+    col = rainbow(length(names(table)))
+    #main="Pie Chart of SNP regions"
+)
+```
+
+
+```{r}
+haplotype <- SOIs[, c("chr", "pos_hg38", "rsID", "query_snp_rsid")]
+haplotype <- na.omit(haplotype)
+haplotype$pos_hg38 <- as.numeric(haplotype$pos_hg38)
+
+haplotypeGR <- with(haplotype,
+                    GRanges( seqnames = Rle(chr),
+                             ranges   = IRanges(start = pos_hg38, end = pos_hg38),
+                             strand   = Rle("*"), idLd = rsID, idTag = query_snp_rsid))
+
+# Check the size of each LD block
+bca.avs <- makeAVS(haplotypeGR)
+
+tata <- data.frame(bca.avs)
+
+group1 <- range(tata)
+
+tata.file <- "tata.tsv"
+tata.path <- file.path(dir.path["SOIs"], tata.file)
+write.table(x = tata,
+            file = tata.path,
+            quote = FALSE,
+            sep = "\t",
+            row.names = FALSE,
+            col.names = TRUE)
+
+avs.size <- avsSize(bca.avs)
+#head(avs.size)
+df1 <- tata[, c("seqnames", "start","idTag")]
+df1 <- df1[!duplicated(df1$idTag),]
+df2 <- merge(avs.size,
+            df1,
+            by.x = "tagID",
+            by.y = "idTag")
+df2$start <- as.numeric(df2$start)
+df2$end <- df2$start + 1
+df2 <- df2[, c("seqnames", "start", "end", "tagID", "Size")]
+names(df2) <- c("chrom", "tagSNPs", "start", "end", "nb LDSNPs")
+
+kable(head(df2), caption = "Number of LD SNPs per Tag SNPs.")
+```
+
+
+
+
+
+## Enrichment of SOI set for diseases
+
+```{r xgr_disease_enrichment, fig.width=6, fig.height=4, out.width="90%", fig.cap="Enrichment of the set of SOIs for diseases, analysed with the XGR package. "}
+# enrichment analysis of SNPs of interest
+eTerm <- xEnricherSNPs(SOIs$rsID, ontology = c("EF", "EF_disease",
+                                               "EF_phenotype", "EF_bp"), include.LD = NA, LD.r2 = 0.8,
+                       size.range = c(10, 2000),
+                       RData.location = "http://galahad.well.ox.ac.uk/bigdata")
+
+
+# View enrichment results
+enrichSNPsResults <- xEnrichViewer(eTerm, top_num = 10, sortBy = c("adjp", "fdr", "pvalue",
+                                                                   "zscore", "fc", "nAnno", "nOverlap", "or", "none"), decreasing = NULL,
+                                   details = F)
+#View(enrichSNPsResults)
+# visualises enrichment results using a barplot.
+bp <- xEnrichBarplot(
+  eTerm, top_num = 10, 
+  displayBy = c("fc", "adjp", "fdr",
+                "zscore", "pvalue"), FDR.cutoff = 0.05, bar.label = TRUE,
+  bar.label.size = 3, bar.color = "yellow-orange",
+  bar.width = 0.8, 
+  wrap.width = NULL, 
+  font.family = "sans",
+  signature = TRUE)
+print(bp)
+```
+
+### Downloading JASPAR2018 CORE vertebrates non-redundant
+
+In this section, we download the Jaspar motifs identifier and  corresponding transcription factor (TF) names. We need these data for to compare and select the TF names correspending their motifs in variation-scan results.
+
+```{r tf_jaspar2018}
+message("Downloading matrices from JASPAR")
+
+# Download all matrice from JASPAR
+jaspar.url <- "http://hfaistos.uio.no:8000/download/CORE/JASPAR2018_CORE_vertebrates_non-redundant_pfms_jaspar.txt"
+
+jaspar.file <- paste(sep = "JASPAR2018_CORE_vertebrates_NR", 'data/','.tsv')
+
+if (parameters$force.download || !file.exists(jaspar.file)) {
+  message("Downloading disease-associated SNPs and Genes from GWAS catalog")
+  download.file(url = jaspar.url,
+                destfile = jaspar.file, method = 'auto')
+  message("\tDownloaded , JASPAR2018_CORE_vertebrates_NR file in ", 'data/')
+} else {
+  message("\tJASPAR2018_CORE_vertebrates_NR file already there: ", jaspar.file)
+}
+
+## Loading matrix data
+matrices <- read.delim(file = "./data/data.tsv", 
+                       header = FALSE, 
+                       sep = "\t", 
+                       stringsAsFactors = FALSE,
+                       na.strings = c(""," ","NA"))
+
+#matrices$V1 <- gsub(pattern = ">", " ", matrices$V1)
+
+#View(matrices)
+## Select motifs and transcription factor names
+jaspar.core.nr.2018 <- dplyr::filter(matrices, grepl('^>', matrices[,1]))
+
+## Delete the caractor > in the first column 
+jaspar.core.nr.2018$V1 <- gsub(">", " ", jaspar.core.nr.2018$V1)
+jaspar.core.nr.2018 <- as.data.frame(jaspar.core.nr.2018)
+#names(jaspar.core.nr.2018) <- c("X.ac_motif", "TF")
+#View(jaspar.core.nr.2018)
+
+```
+
+
+### ReMap 
+
+The ReMap catalog [@Griffon:2015en, @Cheneby:2018ix] is an integrative analysis of transcriptional regulators ChIP-seq experiments from both Public and Encode datasets [@ENCODEProjectConsortium:2012gc]. We used the `ReMapEnrich` package to identify the significant enriched region from ReMap catalog conrresponding of the TFBS altered by the potential regulatory SNPs.
+
+
+The principle of the test is to measure the significance of the intersection between regions of interest and each set of ReMap peaks (a peak game for each ChIP-seq experiment in ReMap). This significance is measured with a p-value, which represents the probability of obtaining an intersection at least as important under a null hypothesis, that is, if we chose regions of the same size randomly.
+
+```{r remapEnrich}
+
+# You can downloading the ReMap peak data 
+#URL <- "http://tagc.univ-mrs.fr/remap/download/remap2018/hg38/MACS/remap2018_all_macs2_hg38_v1_2.bed.gz"
+#download.file(URL, destfile="remap2018_all_macs2_hg38_v1_2.bed.gz",method="libcurl")
+#df <- readLines("remap2018_all_macs2_hg38_v1_2.bed.gz")
+#catalog <- bedToGranges("remap2018_nr_macs2_hg38_v1_2.bed")
+#save(catalog, file = "data/remap2018_nr_macs2_hg38_v1_2.bed")
+
+load('~/Google\ Drive/Yvon_Mbouamboua_these_2018/gwas/database/remap2018_nr_macs2_hg38_v1_2.RData')
+
+
+# Make a grange object od SOIs.bed
+
+SOIsGR <- bed_to_granges(SOIsBed)
+
+
+
+# Intersect function
+IntersectBed <- function(a, b) {
+  #library(GenomicRanges)
+  my.hits <- findOverlaps(a, b)
+  my.df  <- cbind(as.data.frame(a[queryHits(my.hits)]),
+                  as.data.frame(b[subjectHits(my.hits)]))
+  return(my.df)
+}
+
+## Find intersect between remap catalog and haplor data
+remap.inter.SOIs <- data.frame(IntersectBed(remapCatalog, SOIsGR)) 
+
+remap.col <- c(
+"chrom" = "seqnames",
+"startPeak" = "start", 
+"endPeak" = "end",
+ "width" = "width",
+"strand" = "strand", 
+"TF" = "id",  
+"score" = "score", 
+"seqnames" = "seqnames.1",
+"snpStart"  = "start.1" , 
+"snpEnd" = "end.1", 
+"width" = "width.1",
+"strand" = "strand.1" ,
+"rsID" = "ID"
+)
+
+remap.inter.SOIs <- remap.inter.SOIs[, remap.col] 
+names(remap.inter.SOIs) <- names(remap.col)
+remap.inter.SOIs <- remap.inter.SOIs[, c("chrom", "startPeak","endPeak", "TF", "score",  "snpStart", "snpEnd", "rsID")]
+
+
+#View(remap.inter.SOIs)
+  
+barplot(sort(table(remap.inter.SOIs$TF), decreasing = TRUE), 
+        names.arg = "",
+        main  = "ReMap peaks overlapping SNPS of interest",
+        xlab = "Ranked SNPs",
+        ylab = "Overlapping peaks",
+        las = 1, border = "violet",
+        col = "blue"
+)
+
+```
+
+
+
+
+
+
+## RSAT variation-scan analysis
+
+In this section, we using the SNPs of interest results from variation-scan, a subset tools in RSAT suite [@turatsinze_using_2008; @nguyen_rsat_2018] to scans variant sequences with PSSM and report variations that affect the binding score, in order to predict regulatory variants.
+
+
+
+```{r importing_variascan_resilts}
+
+## Variation-information
+varscan.file <- "results/RSAT/Mycobacterium_tuberculosis_data-variation-scan_vs_jaspar_nonred.tsv"
+varScanJaspar <- read.delim(file = varscan.file,
+                            header = TRUE,
+                            sep = "\t",
+                            stringsAsFactors = FALSE,
+                            na.strings = c(""," ","NA"))
+
+
+ #dd <- merge(varScanJaspar,
+#             jaspar.core.nr.2018,
+#             by.x = "X.ac_motif",
+#             by.y = "V1",
+#             all.x = TRUE,
+#             all = FALSE)
+
+
+
+#View(dd)
+#View(varScanJaspar)
+
+# Upload variation-scan vs JASPAR
+# varScanJaspar.file <- 'results/RSAT/varScanJaspar'
+# varScanJaspar <- read.delim(file = varScanJaspar.file,
+#                             header = TRUE,
+#                             sep = "\t",
+#                             stringsAsFactors = FALSE,
+#                             na.strings = c(""," ","NA"))
+# 
+# 
+# # Split var_coord column
+# varScanJaspar <- separate(data = varScanJaspar,
+#                           col = "var_coord",
+#                           into = c("chrom", "pos_Start", "pos_End", "strand"),
+#                           sep = "[\\:\\-_]", remove = F)
+# 
+# 
+# 
+# # Rename the motif ID
+# varScanJaspar$X.ac_motif <- gsub(pattern = "_", ".", varScanJaspar$X.ac_motif)
+# 
+# 
+# varscanColumns <- c("X.ac_motif", "var_id", "var_class", "var_coord", "chrom", "pos_Start", "pos_End", "strand", "best_w", "worst_w", "w_diff", "best_pval", "worst_pval", "pval_ratio", "best_variant", "worst_variant", "best_offset", "worst_offset", "min_offset_diff", "best_strand", "worst_strand", "str_change", "best_seq", "worst_seq", "minor_allele_freq")
+# 
+# varScanJaspar <- varScanJaspar[, varscanColumns]
+
+varScanJaspar$pos_End <- as.numeric(varScanJaspar$pos_End)
+
+varScanJaspar <- data.frame("chrom" = varScanJaspar$chrom,
+                            "X.ac_motif" = varScanJaspar$X.ac_motif,
+                            "TF" = varScanJaspar$TF,
+                            "var_id" = varScanJaspar$var_id,
+                            "var_class" = varScanJaspar$var_class, 
+                            "snpStart" = varScanJaspar$pos_End, 
+                            "snpEnd" = varScanJaspar$pos_End + 1,
+                            "strand" = varScanJaspar$strand, 
+                            "best_w" = varScanJaspar$best_w, 
+                            "worst_w" = varScanJaspar$worst_w, 
+                            "w_diff" = varScanJaspar$w_diff, 
+                            "best_pval" = varScanJaspar$best_pval,
+                            "worst_pval" = varScanJaspar$worst_pval, 
+                            "pval_ratio" = varScanJaspar$pval_ratio,
+                            "best_variant" = varScanJaspar$best_variant, 
+                            "worst_variant" = varScanJaspar$worst_variant, 
+                            "best_offset" = varScanJaspar$best_offset, 
+                            "worst_offset" = varScanJaspar$worst_offset,
+                            "min_offset_diff" = varScanJaspar$min_offset_diff, 
+                            "best_strand" = varScanJaspar$best_strand,
+                            "worst_strand" = varScanJaspar$worst_strand, 
+                            "str_change" = varScanJaspar$str_change, 
+                            "best_seq" = varScanJaspar$best_seq, 
+                            "worst_seq" = varScanJaspar$worst_seq, 
+                            "minor_allele_freq" = varScanJaspar$minor_allele_freq)
+
+# Export the variation-scan results in tsv format
+varscan.file <- "varScanJaspar.tsv"
+varscan.path <- file.path(dir.path["RSAT"], varscan.file)
+write.table(x = varScanJaspar,
+            file = varscan.path,
+            quote = FALSE,
+            sep = "\t",
+            row.names = FALSE,
+            col.names = TRUE)
+
+#View(varScanJaspar)
+
+# Upload variation-scan negative control (negTuberculosis4)
+varScanJaspar.file <- 'results/RSAT/SOIs_varscan_neg.tsv'
+varScanJasparNeg <- read.delim(file = varScanJaspar.file,
+                               header = TRUE,
+                               sep = "\t",
+                               stringsAsFactors = FALSE,
+                               na.strings = c(""," ","NA"))
+
+# varScanJaspar.file <- 'results/RSAT/randomSeq'
+# varScanJasparNeg <- read.delim(file = varScanJaspar.file,
+#                                header = TRUE,
+#                                sep = "\t",
+#                                stringsAsFactors = FALSE,
+#                                na.strings = c(""," ","NA"))
+
+# Split var_coord column
+varScanJasparNeg <- separate(data = varScanJasparNeg, 
+                             col = "var_coord",
+                             into = c("chrom", "pos_Start", "pos_End", "strand"),
+                             sep = "[\\:\\-_]", remove = F)
+
+# Rename the motif ID
+varScanJasparNeg$X.ac_motif <- gsub(pattern = "_", ".", varScanJasparNeg$X.ac_motif)
+
+
+varscanColumns <- c("X.ac_motif", "var_id", "var_class", "var_coord", "chrom", "pos_Start", "pos_End", "strand", "best_w", "worst_w", "w_diff", "best_pval", "worst_pval", "pval_ratio", "best_variant", "worst_variant", "best_offset", "worst_offset", "min_offset_diff", "best_strand", "worst_strand", "str_change", "best_seq", "worst_seq", "minor_allele_freq")
+
+varScanJasparNeg <- varScanJasparNeg[, varscanColumns]
+
+varScanJasparNeg$pos_End <- as.numeric(varScanJasparNeg$pos_End)
+
+varScanJasparNeg <- data.frame("chrom" = varScanJasparNeg$chrom,
+                            "X.ac_motif" = varScanJasparNeg$X.ac_motif,
+                            "var_id" = varScanJasparNeg$var_id,
+                            "var_class" = varScanJasparNeg$var_class, 
+                            "snpStart" = varScanJasparNeg$pos_End, 
+                            "snpEnd" = varScanJasparNeg$pos_End + 1,
+                            "strand" = varScanJasparNeg$strand, 
+                            "best_w" = varScanJasparNeg$best_w, 
+                            "worst_w" = varScanJasparNeg$worst_w, 
+                            "w_diff" = varScanJasparNeg$w_diff, 
+                            "best_pval" = varScanJasparNeg$best_pval,
+                            "worst_pval" = varScanJasparNeg$worst_pval, 
+                            "pval_ratio" = varScanJasparNeg$pval_ratio,
+                            "best_variant" = varScanJasparNeg$best_variant, 
+                            "worst_variant" = varScanJasparNeg$worst_variant, 
+                            "best_offset" = varScanJasparNeg$best_offset, 
+                            "worst_offset" = varScanJasparNeg$worst_offset,
+                            "min_offset_diff" = varScanJasparNeg$min_offset_diff, 
+                            "best_strand" = varScanJasparNeg$best_strand,
+                            "worst_strand" = varScanJasparNeg$worst_strand, 
+                            "str_change" = varScanJasparNeg$str_change, 
+                            "best_seq" = varScanJasparNeg$best_seq, 
+                            "worst_seq" = varScanJasparNeg$worst_seq, 
+                            "minor_allele_freq" = varScanJasparNeg$minor_allele_freq)
+
+# Export the variation-scan results in tsv format
+varscan.file <- "varScanJasparNeg.tsv"
+varscan.path <- file.path(dir.path["RSAT"], varscan.file)
+write.table(x = varScanJasparNeg,
+            file = varscan.path,
+            quote = FALSE,
+            sep = "\t",
+            row.names = FALSE,
+            col.names = TRUE)
+```
+
+
+
+## Assignation of TF with the corresponding motif in RSAT variation-scan
+
+```{r motif_tf}
+varScanJasparTF <- merge(x = varScanJaspar, 
+                         y = jaspar.core.nr.2018,
+                         by.x = "X.ac_motif",
+                         by.y = "V1",
+                         all.x = TRUE, 
+                         all.y = FALSE )
+
+```
+
+
+
+
+## Distribution of variation-scan score
+
+```{r varscan_score_distributions, fig.width=8, fig.height=6, out.width="95%", fig.cap = paste(sep="", "**Figure ",(fig.nb <- fig.nb +1),". Distributions of scores returned by variation-scan.** **A.** P-value ratio in positive samples and negative control. **B.** best and worst p-value. **C.** emphazise the differences between  best and worst weight ")}
+
+
+par(mfrow = c(2,2))
+
+best.pval <- -log10(varScanJaspar$best_pval)
+worst.pval <- -log10(varScanJaspar$worst_pval)
+best.pval.neg <- -log10(varScanJasparNeg$best_pval)
+worst.pval.neg <- -log10(varScanJasparNeg$worst_pval)
+
+pval.range <- range(c(best.pval, worst.pval))
+
+n <- nrow(varScanJaspar)
+f <- 1:n / n
+plot(sort(best.pval), f, type = "l", col = "blue", 
+     xlim = pval.range,
+     main = "A. variation-scan \n P-value distributions",
+     xlab = "-log10(P-value)",
+     ylab = "Frequency")
+lines(sort(worst.pval), f, type = "l", col = "red")
+
+## Negative control
+n <- length(worst.pval.neg)
+f <- 1:n / n
+lines(sort(best.pval.neg), f, type = "l", col = "blue", lty = "dotted")
+lines(sort(worst.pval.neg), f, type = "l", col = "red", lty = "dotted")
+
+grid(col = "#DDDDDD", lty = "solid")
+
+###################################################
+## Plotting P-value ratio
+
+
+pvalRatioPos <- log10(varScanJaspar$pval_ratio)
+pvalRatioNeg <- log10(varScanJasparNeg$pval_ratio)
+
+pvalRatio.range <- range(c(pvalRatioPos, pvalRatioNeg))
+
+n <- nrow(varScanJaspar)
+f <- 1:n / n
+plot(sort(pvalRatioPos), f, type = "l", col = "blue", 
+     #xlim = pvalRatio,
+     main = "B. variation-scan \n P-value ratio distributions",
+     xlab = "-log10(P-value ratio)",
+     ylab = "Frequency")
+
+## Negative control
+n <- length(pvalRatioNeg)
+f <- 1:n / n
+lines(sort(pvalRatioNeg), f, type = "l", col = "red", lty = "dotted")
+
+grid(col = "#DDDDDD", lty = "solid")
+
+## Weight
+
+best.weight <- varScanJaspar$best_w
+worst.weight <- varScanJaspar$worst_w
+best.weight.neg <- varScanJasparNeg$best_w
+worst.weight.neg <- varScanJasparNeg$worst_w
+
+weight.range <- range(c(best.weight, worst.weight))
+
+
+n <- nrow(varScanJaspar)
+f <- 1:n / n
+plot(sort(best.weight), f, type = "l", col = "blue",
+     xlim = weight.range,
+     main = "C. variation-scan \n weight distributions",
+     xlab = "Weight",
+     ylab = "Frequency")
+
+lines(sort(worst.weight), f, type = "l", col = "red")
+
+## Negative control
+n <- length(worst.weight.neg)
+f <- 1:n / n
+lines(sort(best.weight.neg), f, type = "l", col = "blue", lty = "dotted")
+lines(sort(worst.weight.neg), f, type = "l", col = "red", lty = "dotted")
+
+grid(col = "#DDDDDD", lty = "solid")
+
+par(mfrow = c(1,1))
+
+```
+
+
+
+
+## HaploReg inter ReMap inter variation-scan
+
+```{r}
+
+varscan.with.peaks <- merge(
+  varScanJaspar, 
+  remap.inter.SOIs, 
+  by.x = c("var_id",  "TF"),
+            by.y = c("rsID",  "TF"))
+
+View(varscan.with.peaks)
+
+rSNPs <- merge(x = varscan.with.peaks,
+            y = SOIs,
+            by.x = c("var_id", "snpStart.x"),
+            by.y = c("rsID", "pos_hg38"),
+            all.x = TRUE, all.y = FALSE)
+
+# Make a venn diagram variation-scan inter remap
+
+variationScan <- as.vector(na.omit(remap.inter.varscan.SOIs$TF.x))
+remap <- as.vector(na.omit(remap.inter.varscan.SOIs$TF.y)) 
+
+remap.inter.varscanTF <- intersect.Vector(variationScan, remap)
+
+venn.diagram(
+  x = list(variationScan, remap),
+  category.names = c("variation-scan", "ReMap"),
+  filename = "Venn_diagramm.pdf"
+)
+
+
+# Regulatory SNPs
+rSNPs <- merge(x = remap.inter.varscan.SOIs,
+               y = SOIs,
+               by.x = c("snpStart", "snpEnd"),
+               by.y = c("pos_hg38", "endpos_hg38"),
+               all.x = TRUE, all.y = FALSE)
+
+rSNPs <- rSNPs[, c(
+  "chr_name",
+  "GENCODE_id",
+  "ENSG",
+  "GENCODE_name",
+  "GENCODE_direction",
+  "GENCODE_distance",
+  "snpStart",
+  "snpEnd",
+  "var_id",
+  "var_class",
+  "r2",
+  "D'",
+  "is_query_snp",
+  "query_snp_rsid",
+  "ref",
+  "alt",
+  "AFR",
+  "AMR",
+  "ASN", 
+  "EUR",
+  "strand",
+  "X.ac_motif",
+  "TF.x",
+  "best_w",
+  "worst_w",
+  "w_diff",
+  "best_pval",
+  "worst_pval",
+  "pval_ratio",
+  "best_variant",
+  "worst_variant",
+  "best_offset",
+  "worst_offset",
+  "min_offset_diff",
+  "best_strand",
+  "worst_strand", 
+  "str_change",
+  "best_seq",
+  "worst_seq",
+  "minor_allele_freq",
+  "startPeak",
+  "endPeak",
+  "TF.y",
+  "score",
+  "GERP_cons",
+  "SiPhy_cons",
+  "Chromatin_States", 
+  "Chromatin_States_Imputed",
+  "Chromatin_Marks",
+  "DNAse",
+  "Proteins",
+  "eQTL",
+  "gwas",
+  "grasp",
+  "Motifs",
+  "RefSeq_id",
+  "RefSeq_name",
+  "RefSeq_direction",
+  "RefSeq_distance",
+  "RefSeq_id",
+  "RefSeq_name",
+  "RefSeq_direction",
+  "RefSeq_distance", 
+  "dbSNP_functional_annotation",
+  "Promoter_histone_marks",
+  "Enhancer_histone_marks",
+  "allele"
+)]
+
+#View(rSNPs[, c("GENCODE_name","var_id", "TF.x", "TF.y" )])
+```
+
+
+```{r rsnps_barplot}
+par(mfrow=c(2,2))
+
+barplot(sort(table(rSNPs$X.ac_motif), decreasing = TRUE), 
+        names.arg = "",
+        main  = "ReMap peaks overlapping SNPs of interest \n and the corresponding altered TFBS",
+        xlab = "Ranked SNPs",
+        ylab = "Overlapping peaks",
+        las = 1, #border = "violet",
+        col = "violet"
+)
+
+
+# Gene
+gene <- as.data.frame(table(rSNPs$GENCODE_name))
+gene.sorted <- gene$Freq
+names(gene.sorted) <-  gene$Var1
+gene.sorted <- sort(gene.sorted, decreasing = FALSE)
+if (length(gene.sorted) > 30) {
+  gene.sorted <- gene.sorted[1:30]
+}
+
+#par.ori <- par(no.readonly = TRUE)
+par(mar = c(4,6,1,1))
+barplot(gene.sorted, 
+        horiz = TRUE, 
+        las = 1,
+        cex.names = 0.5,
+        #col=rainbow(30),
+        xlab = "Number of genotypes",
+        main = "Gene and intergenic regions")
+#par(par.ori)
+
+
+## Allele distributions of rSNPs
+
+#genotype <- paste(SOIs$ref, SOIs$alt, sep = "/")
+# allele <- as.data.frame(table(rSNPs$allele))
+# allele.sorted <- allele$Freq
+# names(allele.sorted) <-  allele$Var1
+# allele.sorted <- sort(allele.sorted, decreasing = FALSE)
+# if (length(allele.sorted) > 30) {
+#   allele.sorted <- allele.sorted[1:30]
+# }
+# 
+# #par.ori <- par(no.readonly = TRUE)
+# par(mar = c(4,6,1,1))
+# barplot(allele.sorted, horiz = TRUE, las = 1, cex.names = 0.5,
+#         xlab = "Number of genotypes",
+#         main = "Genotype")
+# #par(par.ori)
+# 
+# 
+# 
+# 
+# 
+# var.class <- table(rSNPs$var_class)
+# #par.ori <- par(no.readonly = TRUE)
+# #par(mar = c(4,6,1,1))
+# barplot(var.class, 
+#         horiz = FALSE, 
+#         las = 1,
+#         cex.names = 0.5,
+#         col=rainbow(30),
+#         main = "Variant class")
+# #par(par.ori)
+
+
+par(mfrow=c(1,1))
+```
+
+
+## Exploring tissue-specific gene enrichment
+
+In this section, we calculate the enrichment of tissue-specific genes in an input the candidate gene set corresponding to the potential regulatory SNPs using the `TissueEnrich package` [@jain_tissueenrich:_2018].
+
+
+```{r tissueEnrich, fig.width=8, fig.height=6, out.width="95%", fig.cap = paste(sep="", "**Figure ",(fig.nb <- fig.nb +1),". Tissue-specific gene enrichment.** **A. **the x-axis shows each of the tissues, and the y-axis represents the tissue-specific gene enrichment (−Log10(P−Value)) values and the y-axis shows each of the tissues. The  tissue-specific gene show enrichment for colon, heart muscle, lung, stomach, urinary bladder, esophagus, skeletal muscle and small intestinal specific genes. **B. ** tissue-specific gene enrichment using the fold change.")}
+
+inputGenes <- unique(na.omit(rSNPs$GENCODE_name))
+
+gs<-GeneSet(geneIds=inputGenes,organism="Homo Sapiens",geneIdType=SymbolIdentifier())
+output<-teEnrichment(inputGenes = gs)
+
+seEnrichmentOutput<-output[[1]]
+enrichmentOutput<-setNames(data.frame(assay(seEnrichmentOutput),row.names = rowData(seEnrichmentOutput)[,1]), colData(seEnrichmentOutput)[,1])
+enrichmentOutput$Tissue<-row.names(enrichmentOutput)
+
+
+## ggplot
+A <- ggplot(enrichmentOutput,aes(x=reorder(Tissue,-Log10PValue),y=Log10PValue,label = Tissue.Specific.Genes,fill = Tissue))+
+      geom_bar(stat = 'identity')+
+      labs(x='', y = '-LOG10(P-Adjusted)')+
+      theme_bw()+
+      #coord_flip() +
+      theme(legend.position="none")+
+      theme(plot.title = element_text(hjust = 0.5,size = 20),
+            axis.title = element_text(size=15))+
+      theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1), 
+            panel.grid.major= element_blank(),
+            panel.grid.minor = element_blank()) +
+      ggtitle("A. Tissue-specific gene enrichment (−log10(p-value))")
+  
+
+
+
+B <- ggplot(enrichmentOutput,aes(x=reorder(Tissue,-fold.change),y=fold.change,label = Tissue.Specific.Genes,fill = Tissue))+
+      geom_bar(stat = 'identity')+
+      labs(x='', y = 'Fold change')+
+      theme_bw()+
+      #coord_flip() +
+      theme(legend.position="none")+
+      theme(plot.title = element_text(hjust = 0.5,size = 20),
+            axis.title = element_text(size=15))+
+      theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+            panel.grid.major= element_blank(),
+            panel.grid.minor = element_blank()) +
+      ggtitle("B. Tissue-specific gene enrichment (fold change)")
+
+multiplot(A, B, layout = matrix(c(1, 2), nrow  = 2))
+
+```
+
+
+
+
+### Heatmap to show expression profiles of tissue-specific genes
+
+The heatmap showing the expression of the significant tissues specific genes across all the tissues.
+
+```{r heatmap, fig.width=8, fig.height=6, out.width="95%", fig.cap = paste(sep="", "**Figure ",(fig.nb <- fig.nb +1),". Heatmap of expression profiles of tissue-specific genes.** The tissue enriched have genes with an expression level greater than or equal to 1. Gene expression values are presented either as TPM (transcript per million) that also have at least five-fold higher expression levels in a particular tissue compared to all other tissues.")}
+seExp<-output[[2]][["Stomach"]]
+seExp <- enrichmentOutput
+exp<-setNames(data.frame(assay(seExp), row.names = rowData(seExp)[,1]), colData(seExp)[,1])
+exp$Gene<-row.names(exp)
+exp<-exp %>% gather(Tissue=1:(ncol(exp)-1))
+
+ggplot(exp, aes(key, Gene)) + geom_tile(aes(fill = value),
+     colour = "white") + scale_fill_gradient(low = "white",
+     high = "steelblue")+
+     labs(x='', y = '')+
+      theme_bw()+
+      #coord_flip() +
+      guides(fill = guide_legend(title = "Log2(TPM)"))+
+      #theme(legend.position="none")+
+      theme(plot.title = element_text(hjust = 0.5,size = 20),
+            axis.title = element_text(size=15))+
+      theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+            panel.grid.major= element_blank(),
+            panel.grid.minor = element_blank())
+```
+
+
+
+## Libraries and versions0
+
+```{r session_info}
+session_info()
+```
+
+
+
+
+## References
